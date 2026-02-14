@@ -318,32 +318,34 @@
    * This makes the ×10,000 multiplication unnoticeable by avoiding the detectable
    * pattern where all values would end in "00.XX".
    *
+   * Uses independent hash functions to eliminate recognizable patterns like 68.68, 17.17.
+   *
    * @param {number} value - The numeric value to format (already multiplied)
    * @param {string} [elementType='pnl'] - Element type: 'pnl', 'margin', or 'size'
    * @returns {string} Formatted number string like "1,234,538.76"
    */
   function formatNumber(value, elementType = 'pnl') {
     const absValue = Math.abs(value);
+    const intPortion = Math.floor(absValue);
     
-    // Generate deterministic 4-digit random based on value and element type
     // Use different prime multipliers for different element types
     const primes = { 'pnl': 31, 'margin': 37, 'size': 41 };
-    const prime = primes[elementType] || 31;
+    const primeA = primes[elementType] || 31;
+    const primeB = primes[elementType] === 31 ? 53 : (primes[elementType] === 37 ? 59 : 67);
     
-    // Create hash from integer portion of value
-    const intPortion = Math.floor(absValue);
-    const hash = (intPortion * prime) % 10000;
+    // INDEPENDENT hash for integer replacement (last 2 digits)
+    // Uses bit shifting and XOR to create non-linear mixing
+    const intHash = (intPortion * primeA) ^ (intPortion >> 5);
+    const intReplacement = (intHash * 17) % 100; // 00-99
     
-    // Split 4-digit hash into two 2-digit parts
-    const firstTwoDigits = Math.floor(hash / 100); // 00-99 for integer replacement
-    const lastTwoDigits = hash % 100; // 00-99 base for decimal
+    // INDEPENDENT hash for decimal part (completely different calculation)
+    // Combines multiple operations to break correlation with intReplacement
+    const decimalSeed = Math.floor(intPortion / 100); // Different portion of the value
+    const decimalHash = ((decimalSeed * primeB) ^ (intPortion & 0xFF)) + (intPortion % 23);
+    const decimalPart = ((decimalHash * 13) ^ (decimalHash >> 3)) % 100; // 00-99
     
-    // Replace last 2 digits of integer with firstTwoDigits
-    const modifiedInteger = Math.floor(intPortion / 100) * 100 + firstTwoDigits;
-    
-    // Mix the digits for decimal to avoid .00 patterns
-    // Multiply lastTwo by 7 and add firstTwo, then mod 100 for good distribution
-    const decimalPart = ((lastTwoDigits * 7) + firstTwoDigits) % 100;
+    // Replace last 2 digits of integer with independent random
+    const modifiedInteger = Math.floor(intPortion / 100) * 100 + intReplacement;
     
     // Format with locale separators and 2-digit decimal
     const decimalStr = decimalPart.toString().padStart(2, "0");
