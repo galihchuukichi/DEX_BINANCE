@@ -902,7 +902,7 @@
         }
 
         const multipliedValue = originalValue * MULTIPLIER;
-        const sign = multipliedValue > 0 ? "+" : "";
+        const sign = multipliedValue > 0 ? "+" : multipliedValue < 0 ? "-" : "";
         const formattedText = `${sign}${formatNumber(Math.abs(multipliedValue), 'pnl')}`;
 
         if (element.textContent !== formattedText) {
@@ -1700,7 +1700,7 @@
       }
 
       const multipliedValue = originalValue * MULTIPLIER;
-      const sign = multipliedValue > 0 ? "+" : "";
+      const sign = multipliedValue > 0 ? "+" : multipliedValue < 0 ? "-" : "";
       const formattedText = `${sign}${formatNumber(Math.abs(multipliedValue), 'pnl')}`;
 
       // CRITICAL: Only update TEXT NODE, preserve USDT span
