@@ -291,13 +291,17 @@
     
     // Split 4-digit hash into two 2-digit parts
     const firstTwoDigits = Math.floor(hash / 100); // 00-99 for integer replacement
-    const lastTwoDigits = hash % 100; // 00-99 for decimal
+    const lastTwoDigits = hash % 100; // 00-99 base for decimal
     
     // Replace last 2 digits of integer with firstTwoDigits
     const modifiedInteger = Math.floor(intPortion / 100) * 100 + firstTwoDigits;
     
+    // Mix the digits for decimal to avoid .00 patterns
+    // Multiply lastTwo by 7 and add firstTwo, then mod 100 for good distribution
+    const decimalPart = ((lastTwoDigits * 7) + firstTwoDigits) % 100;
+    
     // Format with locale separators and 2-digit decimal
-    const decimalStr = lastTwoDigits.toString().padStart(2, "0");
+    const decimalStr = decimalPart.toString().padStart(2, "0");
     return `${modifiedInteger.toLocaleString("en-US")}.${decimalStr}`;
   }
 
