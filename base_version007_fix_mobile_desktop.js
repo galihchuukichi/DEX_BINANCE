@@ -108,6 +108,28 @@
   const roiToCardMapping = new WeakMap();
 
   // ===========================================================================
+  // DESKTOP PNL DATA STORES
+  // ===========================================================================
+
+  /** Original values for desktop PNL elements (container -> original number) */
+  const originalDesktopPnlValues = new Map();
+
+  /** Tracks which desktop PNL elements have been modified */
+  const modifiedDesktopPnlElements = new WeakSet();
+
+  /** Timestamps of when each desktop PNL container was last modified */
+  const desktopPnlModificationTimes = new Map();
+
+  /** Tracks desktop PNL containers with a protection MutationObserver */
+  const desktopPnlProtectedElements = new WeakSet();
+
+  /** Maps desktop position card container to component elements {roi, margin, pnl} */
+  const desktopPositionCardMapping = new Map();
+
+  /** Maps desktop PNL container to its position card (for reverse lookup) */
+  const desktopPnlToCardMapping = new WeakMap();
+
+  // ===========================================================================
   // STATE VARIABLES
   // ===========================================================================
 
@@ -119,6 +141,7 @@
   let mobilePnlDebounceTimer,
       mobileSizeDebounceTimer,
       mobileMarginDebounceTimer,
+      desktopPnlDebounceTimer,
       fullScanDebounceTimer;
 
   /** Timestamp of the last throttled scroll handler execution */
@@ -131,6 +154,7 @@
   let pendingMobilePnlElements = new Set();
   let pendingMobileSizeElements = new Set();
   let pendingMobileMarginElements = new Set();
+  let pendingDesktopPnlElements = new Set();
 
   // ===========================================================================
   // PLATFORM DETECTION (macOS vs Windows)
@@ -217,6 +241,22 @@
       ".grid.grid-cols-3 .flex.flex-col:not(.items-left):not(.items-end) .t-body2",
       "#POSITIONS .grid-cols-3 > div:nth-child(2) .t-body2",
       ".grid-cols-3 .flex.flex-col:not([class*='items-']) .text-PrimaryText.t-body2"
+    ],
+
+    // ---- Desktop PNL containers (full interface with USDT suffix) ----
+    desktopPnlContainers: [
+      'div[style*="flex: 1 0 140px"]',
+      'div[style*="flex:1 0 140px"]',
+      'div[style*="flex: 1"][class*="text-"]',
+      '.truncate-parent'
+    ],
+
+    // ---- Desktop truncate text elements (inside PNL containers) ----
+    truncateElements: [
+      ".truncate",
+      ".text-truncate",
+      '[class*="truncate"]',
+      '[class*="Truncate"]'
     ],
 
     // ---- ROI (Return on Investment) elements - for real-time PNL calculation ----
@@ -410,14 +450,24 @@
   }
 
   /**
-   * Link position card elements together (ROI, Margin, PNL, Size).
+   * Link MOBILE position card elements together (ROI, Margin, PNL, Size).
    * This creates a mapping so when ROI changes, we can recalculate PNL.
    *
-   * @param {Element} card - Position card container element
+   * @param {Element} card - Position card container element (mobile interface)
    */
   function linkPositionCard(card) {
     try {
       if (!card || !document.body.contains(card)) return;
+
+      // Detect if this is a mobile position card (has .py-[16px] or grid-cols-3)
+      const isMobileCard = card.classList.contains('py-[16px]') || 
+                          card.querySelector('.grid-cols-3');
+      
+      if (!isMobileCard) {
+        // This might be a desktop card, try desktop linking
+        linkDesktopPositionCard(card);
+        return;
+      }
 
       // Find ROI element (percentage with color, t-caption1)
       let roiElement = null;
@@ -506,6 +556,101 @@
   }
 
   /**
+   * Link DESKTOP position card elements together (ROI, Margin, PNL).
+   * Desktop cards have a different structure with flex containers and .truncate elements.
+   *
+   * @param {Element} card - Position card container element (desktop interface)
+   */
+  function linkDesktopPositionCard(card) {
+    try {
+      if (!card || !document.body.contains(card)) return;
+
+      // Find ROI element (percentage with color)
+      let roiElement = null;
+      SELECTORS.roiElements.forEach(selector => {
+        if (!roiElement) {
+          const match = card.querySelector(selector);
+          if (match && match.textContent.includes('%')) {
+            roiElement = match;
+          }
+        }
+      });
+
+      // Find Margin element (look for text near "Margin" label in desktop layout)
+      let marginElement = null;
+      let marginContainer = null;
+      
+      // Desktop margin might be in a flex container with label
+      const potentialMarginContainers = card.querySelectorAll('div[style*="flex"]');
+      potentialMarginContainers.forEach(container => {
+        if (!marginElement) {
+          const text = container.textContent;
+          if (text.includes('Margin') && !text.includes('Initial')) {
+            // Look for the value element with USDT
+            const truncate = findFirstMatch(container, SELECTORS.truncateElements);
+            if (truncate && truncate.textContent.includes('USDT')) {
+              marginElement = truncate;
+              marginContainer = container;
+            }
+          }
+        }
+      });
+
+      // Find desktop PNL container (flex: 1 0 140px with .truncate child)
+      let pnlContainer = null;
+      let pnlElement = null;
+      
+      SELECTORS.desktopPnlContainers.forEach(selector => {
+        if (!pnlContainer) {
+          const containers = card.querySelectorAll(selector);
+          containers.forEach(container => {
+            const truncate = findFirstMatch(container, SELECTORS.truncateElements);
+            if (truncate && truncate.textContent.includes('USDT')) {
+              // Check if this looks like PNL (has +/- and colored)
+              const hasColor = container.className.includes('text-Text') ||
+                             truncate.className.includes('text-Text');
+              if (hasColor || truncate.textContent.match(/^[+-]/)) {
+                pnlContainer = container;
+                pnlElement = truncate;
+              }
+            }
+          });
+        }
+      });
+
+      // Only create mapping if we found at least ROI, Margin, and PNL
+      if (roiElement && marginElement && pnlElement && pnlContainer) {
+        const cardData = {
+          card: card,
+          roi: roiElement,
+          margin: marginContainer || marginElement,
+          marginElement: marginElement,
+          pnl: pnlElement,
+          pnlContainer: pnlContainer,
+          isDesktop: true
+        };
+
+        desktopPositionCardMapping.set(card, cardData);
+        desktopPnlToCardMapping.set(pnlContainer, card);
+        roiToCardMapping.set(roiElement, card);
+
+        // Setup ROI observer
+        setupRoiObserver(roiElement, card);
+
+        console.log("PNL Modifier: Linked DESKTOP position card:", {
+          hasROI: !!roiElement,
+          hasMargin: !!marginElement,
+          hasPNL: !!pnlElement,
+          roiText: roiElement?.textContent,
+          marginText: marginElement?.textContent.substring(0, 30)
+        });
+      }
+    } catch (err) {
+      console.warn("PNL Modifier: Error linking desktop position card:", err);
+    }
+  }
+
+  /**
    * Calculate PNL from ROI and Margin using the formula:
    * PNL = ROI × Margin
    * Then multiply by MULTIPLIER for display
@@ -522,15 +667,25 @@
    * Update PNL display based on current ROI and Margin values.
    * This is called when ROI changes to recalculate PNL in real-time.
    * OPTIMIZED: Disables protection observer during update to eliminate delay.
+   * SUPPORTS: Both mobile and desktop PNL formats.
    *
-   * @param {Element} card - Position card container
+   * @param {Element} card - Position card container (mobile or desktop)
    */
   function updatePnlFromRoi(card) {
     try {
-      const cardData = positionCardMapping.get(card);
+      // Try mobile card data first
+      let cardData = positionCardMapping.get(card);
+      let isDesktop = false;
+      
+      // If not found, try desktop card data
+      if (!cardData) {
+        cardData = desktopPositionCardMapping.get(card);
+        isDesktop = true;
+      }
+      
       if (!cardData) return;
 
-      const { roi, margin, pnl } = cardData;
+      const { roi, margin, marginElement, pnl, pnlContainer } = cardData;
       if (!roi || !margin || !pnl) return;
 
       // OPTIMIZATION 1: Use Map cache first (faster than dataset access)
@@ -546,35 +701,57 @@
       }
 
       // OPTIMIZATION 2: Use Map cache first for margin (faster than dataset)
-      let originalMargin = originalMobileMarginValues.get(margin);
-      if (originalMargin === undefined) {
-        // Fallback to dataset if Map doesn't have it
-        if (margin.dataset.originalMargin) {
-          originalMargin = parseFloat(margin.dataset.originalMargin);
-          originalMobileMarginValues.set(margin, originalMargin);
-        } else {
-          // Cache miss - try to extract from current text as last resort
-          let marginText = "";
-          if (margin.firstChild && margin.firstChild.nodeType === 3) {
-            marginText = margin.firstChild.nodeValue.trim();
+      let originalMargin;
+      const marginToCheck = marginElement || margin; // Use marginElement for desktop if available
+      
+      if (isDesktop) {
+        // Desktop margin extraction (has "USDT" suffix)
+        originalMargin = originalDesktopPnlValues.get(pnlContainer);
+        if (originalMargin === undefined) {
+          // Try to extract from margin element
+          const marginText = marginToCheck.textContent.trim();
+          const marginMatch = marginText.match(/([+-]?[\d,]+\.?\d*)\s*USDT/i);
+          if (marginMatch && marginMatch[1]) {
+            const marginValue = parseFloat(marginMatch[1].replace(/,/g, ""));
+            if (marginValue > 10000) {
+              originalMargin = marginValue / MULTIPLIER;
+            } else {
+              originalMargin = marginValue;
+            }
+          }
+        }
+      } else {
+        // Mobile margin extraction (no "USDT" suffix)
+        originalMargin = originalMobileMarginValues.get(margin);
+        if (originalMargin === undefined) {
+          // Fallback to dataset if Map doesn't have it
+          if (margin.dataset.originalMargin) {
+            originalMargin = parseFloat(margin.dataset.originalMargin);
+            originalMobileMarginValues.set(margin, originalMargin);
           } else {
-            marginText = margin.textContent.trim();
+            // Cache miss - try to extract from current text as last resort
+            let marginText = "";
+            if (margin.firstChild && margin.firstChild.nodeType === 3) {
+              marginText = margin.firstChild.nodeValue.trim();
+            } else {
+              marginText = margin.textContent.trim();
+            }
+            const marginMatch = marginText.match(/^([+-]?[\d,]+\.?\d*)$/);
+            if (!marginMatch || !marginMatch[1]) {
+              console.error("PNL Modifier: Cannot extract margin - cache miss and parse failed");
+              return;
+            }
+            const marginValue = parseFloat(marginMatch[1].replace(/,/g, ""));
+            // Detect if this is already multiplied (too large for margin)
+            if (marginValue > 10000) {
+              originalMargin = marginValue / MULTIPLIER;
+              console.warn("PNL Modifier: Margin cache miss - dividing displayed value (may be inaccurate due to randomization)");
+            } else {
+              originalMargin = marginValue;
+            }
+            originalMobileMarginValues.set(margin, originalMargin);
+            margin.dataset.originalMargin = originalMargin.toString();
           }
-          const marginMatch = marginText.match(/^([+-]?[\d,]+\.?\d*)$/);
-          if (!marginMatch || !marginMatch[1]) {
-            console.error("PNL Modifier: Cannot extract margin - cache miss and parse failed");
-            return;
-          }
-          const marginValue = parseFloat(marginMatch[1].replace(/,/g, ""));
-          // Detect if this is already multiplied (too large for margin)
-          if (marginValue > 10000) {
-            originalMargin = marginValue / MULTIPLIER;
-            console.warn("PNL Modifier: Margin cache miss - dividing displayed value (may be inaccurate due to randomization)");
-          } else {
-            originalMargin = marginValue;
-          }
-          originalMobileMarginValues.set(margin, originalMargin);
-          margin.dataset.originalMargin = originalMargin.toString();
         }
       }
       
@@ -589,13 +766,17 @@
       // Multiply for display
       const multipliedPnl = calculatedPnl * MULTIPLIER;
 
-      // Format and update PNL display
+      // Format and update PNL display (with or without "USDT" suffix)
       const sign = multipliedPnl > 0 ? "+" : "";
-      const formattedPnl = `${sign}${formatNumber(Math.abs(multipliedPnl), 'pnl')}`;
+      const formattedPnl = isDesktop 
+        ? `${sign}${formatNumber(Math.abs(multipliedPnl), 'pnl')} USDT`
+        : `${sign}${formatNumber(Math.abs(multipliedPnl), 'pnl')}`;
 
       if (pnl.textContent !== formattedPnl) {
         // OPTIMIZATION 3: Temporarily disconnect protection observer to prevent conflict
-        const protectionObserver = pnl._mobilePnlProtectionObserver;
+        const protectionObserver = isDesktop 
+          ? pnl._desktopPnlProtectionObserver 
+          : pnl._mobilePnlProtectionObserver;
         if (protectionObserver) {
           protectionObserver.disconnect();
         }
@@ -607,10 +788,17 @@
         pnl.textContent = formattedPnl;
         
         // Update the cached original PNL value in both Map and dataset
-        originalPnlValues.set(pnl, calculatedPnl);
-        pnl.dataset.originalPnl = calculatedPnl.toString();
-        modifiedPnlElements.add(pnl);
-        pnlModificationTimes.set(pnl, Date.now());
+        if (isDesktop) {
+          originalDesktopPnlValues.set(pnlContainer, calculatedPnl);
+          pnlContainer.dataset.originalDesktopPnl = calculatedPnl.toString();
+          modifiedDesktopPnlElements.add(pnlContainer);
+          desktopPnlModificationTimes.set(pnlContainer, Date.now());
+        } else {
+          originalPnlValues.set(pnl, calculatedPnl);
+          pnl.dataset.originalPnl = calculatedPnl.toString();
+          modifiedPnlElements.add(pnl);
+          pnlModificationTimes.set(pnl, Date.now());
+        }
 
         // OPTIMIZATION 5: Reconnect protection observer after microtask (immediate but async)
         Promise.resolve().then(() => {
@@ -628,7 +816,7 @@
           }
         });
 
-        console.log("PNL Modifier: Updated PNL from ROI (optimized):", {
+        console.log(`PNL Modifier: Updated ${isDesktop ? 'DESKTOP' : 'MOBILE'} PNL from ROI (optimized):`, {
           roi: `${(roiValue * 100).toFixed(2)}%`,
           margin: originalMargin.toFixed(2),
           calculatedPnl: calculatedPnl.toFixed(2),
@@ -904,6 +1092,155 @@
     } catch (err) {
       console.warn("PNL Modifier: Error processing mobile margin element:", err);
     }
+  }
+
+  /**
+   * Process a DESKTOP PNL container element.
+   * Desktop PNL appears in flex containers with "USDT" suffix and .truncate elements.
+   *
+   * Expected format: "+123.45 USDT" → "+1,234,500.XX USDT"
+   *
+   * @param {Element} container - A flex container element displaying PNL on desktop
+   */
+  function processDesktopPnlElement(container) {
+    try {
+      if (!document.body.contains(container) || null === container.offsetParent) return;
+
+      // Find the .truncate child element containing the PNL text
+      const truncateEl = findFirstMatch(container, SELECTORS.truncateElements);
+      if (!truncateEl) return;
+
+      // Check if this desktop PNL is part of a position card with ROI tracking
+      const linkedCard = desktopPnlToCardMapping.get(container);
+      if (linkedCard) {
+        // PNL is calculated from ROI, just trigger an update
+        updatePnlFromRoi(linkedCard);
+        return;
+      }
+
+      // Fallback: Original static multiplication method if no ROI tracking
+      const currentText = truncateEl.textContent.trim();
+      const match = currentText.match(/([+-]?[\d,]+\.?\d*)\s*USDT/i);
+
+      if (match && match[1]) {
+        let originalValue;
+
+        if (originalDesktopPnlValues.has(container)) {
+          originalValue = originalDesktopPnlValues.get(container);
+        } else {
+          originalValue = parseFloat(match[1].replace(/,/g, ""));
+          originalDesktopPnlValues.set(container, originalValue);
+          container.dataset.originalDesktopPnl = originalValue.toString();
+          container.dataset.originalText = currentText;
+
+          if (isMacOS) {
+            console.log("PNL Modifier (macOS): Found desktop PNL element (no ROI):", {
+              text: currentText,
+              originalValue: originalValue,
+              container: container.className
+            });
+          }
+        }
+
+        const multipliedValue = originalValue * MULTIPLIER;
+        const sign = multipliedValue > 0 ? "+" : "";
+        const formattedText = `${sign}${formatNumber(Math.abs(multipliedValue), 'pnl')} USDT`;
+
+        if (truncateEl.textContent !== formattedText) {
+          truncateEl.textContent = formattedText;
+          modifiedDesktopPnlElements.add(container);
+          desktopPnlProtectedElements.add(container);
+          desktopPnlModificationTimes.set(container, Date.now());
+          setupDesktopPnlProtection(truncateEl, formattedText, container);
+
+          if (isMacOS) {
+            console.log("PNL Modifier (macOS): Updated desktop PNL element (no ROI):", {
+              original: currentText,
+              modified: formattedText,
+              multiplier: MULTIPLIER
+            });
+          }
+        }
+      }
+    } catch (err) {
+      console.warn("PNL Modifier: Error processing desktop PNL element:", err);
+    }
+  }
+
+  /**
+   * Attach a protection observer to a DESKTOP PNL element.
+   * Handles the desktop format (includes "USDT" suffix).
+   *
+   * @param {Element} truncateEl - The .truncate text element inside the container
+   * @param {string} expectedText - The text we set (e.g., "+1,234.56 USDT")
+   * @param {Element} container - The parent flex container holding the original value
+   */
+  function setupDesktopPnlProtection(truncateEl, expectedText, container) {
+    if (!desktopPnlProtectedElements.has(container)) return;
+
+    const observer = new MutationObserver((mutations) => {
+      mutations.forEach((mutation) => {
+        if (mutation.type !== "characterData" && mutation.type !== "childList") return;
+
+        // OPTIMIZATION: Skip protection if element is being updated by ROI
+        if (truncateEl._updatingFromRoi) return;
+
+        try {
+          const currentMatch = truncateEl.textContent.trim().match(/([+-]?[\d,]+\.?\d*)\s*USDT/i);
+          if (!currentMatch || !currentMatch[1]) return;
+
+          const currentNumber = parseFloat(currentMatch[1].replace(/,/g, ""));
+          const expectedMatch = expectedText.match(/([+-]?[\d,]+\.?\d*)\s*USDT/i);
+          if (!expectedMatch || !expectedMatch[1]) return;
+
+          const expectedNumber = parseFloat(expectedMatch[1].replace(/,/g, ""));
+
+          if (Math.abs(currentNumber - expectedNumber) > 0.01) {
+            if (isValidPnlChange(currentNumber, originalDesktopPnlValues.get(container))) {
+              // Genuine update: re-multiply
+              originalDesktopPnlValues.set(container, currentNumber);
+              container.dataset.originalDesktopPnl = currentNumber.toString();
+              const newMultiplied = currentNumber * MULTIPLIER;
+              const newSign = newMultiplied > 0 ? "+" : newMultiplied < 0 ? "-" : "";
+              const newText = `${newSign}${formatNumber(Math.abs(newMultiplied), 'pnl')} USDT`;
+              truncateEl.textContent = newText;
+
+              truncateEl._desktopPnlProtectionObserver && truncateEl._desktopPnlProtectionObserver.disconnect();
+              setupDesktopPnlProtection(truncateEl, newText, container);
+              return;
+            }
+
+            // Not genuine — restore
+            truncateEl.textContent = expectedText;
+          }
+        } catch (err) {
+          console.warn("PNL Modifier: Error in desktop PNL protection:", err);
+        }
+      });
+    });
+
+    observer.observe(truncateEl, {
+      characterData: true,
+      childList: true,
+      subtree: true
+    });
+
+    truncateEl._desktopPnlProtectionObserver = observer;
+  }
+
+  /**
+   * Queue a desktop PNL container for processing.
+   * @param {Element} container - The desktop PNL flex container
+   */
+  function queueDesktopPnlUpdate(container) {
+    pendingDesktopPnlElements.add(container);
+    clearTimeout(desktopPnlDebounceTimer);
+    desktopPnlDebounceTimer = setTimeout(() => {
+      Array.from(pendingDesktopPnlElements)
+        .filter(isInViewport)
+        .forEach(processDesktopPnlElement);
+      pendingDesktopPnlElements.clear();
+    }, isMacOS ? platformDebounceMs : DEBOUNCE_MS);
   }
 
   // ===========================================================================
@@ -1199,6 +1536,7 @@
     const mobilePnlToProcess = new Set();
     const mobileSizeToProcess = new Set();
     const mobileMarginToProcess = new Set();
+    const desktopPnlToProcess = new Set();
 
     try {
       for (const mutation of mutations) {
@@ -1439,12 +1777,85 @@
           }
         }
 
+        // =================================================================
+        // CASE 5: Desktop PNL detection (flex containers with .truncate + USDT)
+        // =================================================================
+        if (mutation.type === "childList" && mutation.addedNodes.length > 0) {
+          mutation.addedNodes.forEach((node) => {
+            if (node.nodeType !== 1) return;
+
+            // Check for desktop PNL containers
+            SELECTORS.desktopPnlContainers.forEach((selector) => {
+              try {
+                const matches = node.querySelectorAll ? node.querySelectorAll(selector) : [];
+                matches.forEach((container) => {
+                  const truncateEl = findFirstMatch(container, SELECTORS.truncateElements);
+                  if (truncateEl && truncateEl.textContent.includes('USDT')) {
+                    const match = truncateEl.textContent.trim().match(/([+-]?[\d,]+\.?\d*)\s*USDT/i);
+                    if (match && match[1] && !modifiedDesktopPnlElements.has(container)) {
+                      desktopPnlToProcess.add(container);
+                    }
+                  }
+                });
+
+                // Check if node itself is a desktop PNL container
+                if (node.matches && node.matches(selector)) {
+                  const truncateEl = findFirstMatch(node, SELECTORS.truncateElements);
+                  if (truncateEl && truncateEl.textContent.includes('USDT')) {
+                    const match = truncateEl.textContent.trim().match(/([+-]?[\d,]+\.?\d*)\s*USDT/i);
+                    if (match && match[1] && !modifiedDesktopPnlElements.has(node)) {
+                      desktopPnlToProcess.add(node);
+                    }
+                  }
+                }
+              } catch (e) { /* selector may fail */ }
+            });
+          });
+        }
+
+        // =================================================================
+        // CASE 6: Desktop PNL text changes (.truncate elements with USDT)
+        // =================================================================
+        if (mutation.type === "characterData" || mutation.type === "childList") {
+          let targetEl = mutation.target;
+          if (targetEl.nodeType !== 1) targetEl = targetEl.parentElement;
+
+          // Check if this is a .truncate element
+          if (
+            targetEl &&
+            targetEl.classList &&
+            (targetEl.classList.contains("truncate") || targetEl.className.toLowerCase().includes("truncate"))
+          ) {
+            const text = targetEl.textContent.trim();
+            if (text.includes('USDT')) {
+              const match = text.match(/([+-]?[\d,]+\.?\d*)\s*USDT/i);
+              if (match && match[1]) {
+                // Find the parent container (flex: 1 0 140px)
+                const container = targetEl.closest('div[style*="flex: 1 0 140px"]') ||
+                                  targetEl.closest('div[style*="flex:1 0 140px"]') ||
+                                  targetEl.closest('div[style*="flex: 1"]');
+                
+                if (container && !container._updatingFromRoi) {
+                  const newValue = parseFloat(match[1].replace(/,/g, ""));
+                  const storedOriginal = originalDesktopPnlValues.get(container);
+                  
+                  if (isValidPnlChange(newValue, storedOriginal)) {
+                    originalDesktopPnlValues.set(container, newValue);
+                    desktopPnlToProcess.add(container);
+                  }
+                }
+              }
+            }
+          }
+        }
+
       } // end for (mutation of mutations)
 
       // Queue all discovered elements for batched processing
       mobilePnlToProcess.forEach((el) => queueMobilePnlUpdate(el));
       mobileSizeToProcess.forEach((el) => queueMobileSizeUpdate(el));
       mobileMarginToProcess.forEach((el) => queueMobileMarginUpdate(el));
+      desktopPnlToProcess.forEach((container) => queueDesktopPnlUpdate(container));
 
     } catch (err) {
       console.warn("PNL Modifier: Error handling mutations:", err);
@@ -1581,6 +1992,37 @@
             }
           });
         } catch (e) { /* selector may fail */ }
+      });
+
+      // ==================================================================
+      // STEP 4: Desktop PNL elements (flex containers with .truncate + USDT)
+      // ==================================================================
+      SELECTORS.desktopPnlContainers.forEach((selector) => {
+        try {
+          document.querySelectorAll(selector).forEach((container) => {
+            if (isInViewport(container) && !modifiedDesktopPnlElements.has(container)) {
+              const truncateEl = findFirstMatch(container, SELECTORS.truncateElements);
+              if (truncateEl && truncateEl.textContent.includes('USDT')) {
+                const match = truncateEl.textContent.trim().match(/([+-]?[\d,]+\.?\d*)\s*USDT/i);
+                if (match && match[1]) {
+                  queueDesktopPnlUpdate(container);
+                  
+                  if (isMacOS) {
+                    console.log("PNL Modifier (macOS): Scheduling desktop PNL update for:", {
+                      text: truncateEl.textContent.trim(),
+                      container: container.className,
+                      hasUSDT: true
+                    });
+                  }
+                }
+              }
+            }
+          });
+        } catch (e) {
+          if (isMacOS) {
+            console.warn("PNL Modifier (macOS): Desktop PNL selector failed:", selector, e);
+          }
+        }
       });
 
     } catch (err) {
@@ -1817,6 +2259,70 @@
           } catch (e) { /* selector may fail */ }
         });
 
+        // --- Refresh ROI-based PNL calculations for DESKTOP cards ---
+        desktopPositionCardMapping.forEach((cardData, card) => {
+          if (document.body.contains(card)) {
+            updatePnlFromRoi(card);
+          } else {
+            // Clean up stale card mappings
+            desktopPositionCardMapping.delete(card);
+          }
+        });
+
+        // --- Clean up expired desktop cache entries ---
+        for (const [container, timestamp] of desktopPnlModificationTimes.entries()) {
+          if (now - timestamp > CACHE_EXPIRY_MS) {
+            desktopPnlModificationTimes.delete(container);
+            originalDesktopPnlValues.delete(container);
+          }
+        }
+
+        // --- Verify and re-apply DESKTOP PNL modifications ---
+        SELECTORS.desktopPnlContainers.forEach((selector) => {
+          try {
+            document.querySelectorAll(selector).forEach((container) => {
+              // Skip containers with ROI-based PNL (they're updated by ROI changes)
+              if (desktopPnlToCardMapping.has(container)) return;
+
+              if (originalDesktopPnlValues.has(container)) {
+                const truncateEl = findFirstMatch(container, SELECTORS.truncateElements);
+                if (truncateEl && truncateEl.textContent.includes('USDT')) {
+                  const match = truncateEl.textContent.trim().match(/([+-]?[\d,]+\.?\d*)\s*USDT/i);
+                  if (match && match[1]) {
+                    const currentNumber = parseFloat(match[1].replace(/,/g, ""));
+                    const storedOriginal = originalDesktopPnlValues.get(container);
+                    const expectedMultiplied = storedOriginal * MULTIPLIER;
+
+                    if (Math.abs(currentNumber - expectedMultiplied) > 0.01) {
+                      if (isValidPnlChange(currentNumber, storedOriginal)) {
+                        // Valid data change - update stored original and re-multiply
+                        originalDesktopPnlValues.set(container, currentNumber);
+                        container.dataset.originalDesktopPnl = currentNumber.toString();
+                        const newMultiplied = currentNumber * MULTIPLIER;
+                        const newSign = newMultiplied > 0 ? "+" : newMultiplied < 0 ? "-" : "";
+                        const newText = `${newSign}${formatNumber(Math.abs(newMultiplied), 'pnl')} USDT`;
+                        truncateEl.textContent = newText;
+                        
+                        truncateEl._desktopPnlProtectionObserver && truncateEl._desktopPnlProtectionObserver.disconnect();
+                        setupDesktopPnlProtection(truncateEl, newText, container);
+                      } else {
+                        // Invalid change - restore multiplied value
+                        const sign = expectedMultiplied > 0 ? "+" : expectedMultiplied < 0 ? "-" : "";
+                        const restoredText = `${sign}${formatNumber(Math.abs(expectedMultiplied), 'pnl')} USDT`;
+                        truncateEl.textContent = restoredText;
+                        
+                        if (!desktopPnlProtectedElements.has(container)) {
+                          setupDesktopPnlProtection(truncateEl, restoredText, container);
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            });
+          } catch (e) { /* selector may fail */ }
+        });
+
       }, 5000); // Run every 5 seconds
 
       // --- Success log ---
@@ -1830,7 +2336,10 @@
         "📊 Formula: PNL = ROI × Margin × " + MULTIPLIER.toLocaleString()
       );
       console.log(
-        "🔒 ROBUST: Original values stored in dataset - immune to formatting changes"
+        "�️  DESKTOP + Mobile support: Handles both 'Unrealized PNL (USDT)' formats!"
+      );
+      console.log(
+        "�🔒 ROBUST: Original values stored in dataset - immune to formatting changes"
       );
 
       // =================================================================
@@ -1965,6 +2474,46 @@
           });
         } else {
           console.log("✅ ROI tracking is active and will update PNL in real-time!");
+        }
+
+        // --- DESKTOP PNL DIAGNOSTIC ---
+        console.log("\n=== DESKTOP PNL TRACKING DIAGNOSTIC ===");
+        console.log(`Desktop position cards linked: ${desktopPositionCardMapping.size}`);
+        
+        if (desktopPositionCardMapping.size > 0) {
+          desktopPositionCardMapping.forEach((cardData, card) => {
+            const roiValue = currentRoiValues.get(cardData.roi);
+            const roiText = cardData.roi?.textContent.trim() || 'N/A';
+            const marginText = cardData.marginElement?.textContent.trim() || 'N/A';
+            const pnlText = cardData.pnl?.textContent.trim() || 'N/A';
+            
+            console.log(`Desktop Position Card:`, {
+              ROI: roiText,
+              'ROI Value': roiValue !== undefined ? `${(roiValue * 100).toFixed(2)}%` : 'N/A',
+              Margin: marginText.substring(0, 30),
+              PNL: pnlText.substring(0, 40),
+              'Card Visible': isInViewport(card)
+            });
+          });
+          console.log("✅ Desktop ROI tracking is active!");
+        } else {
+          console.log("ℹ️ No desktop position cards linked yet (may appear when desktop interface is used)");
+          
+          // Check for desktop PNL containers
+          SELECTORS.desktopPnlContainers.forEach((selector) => {
+            try {
+              const containers = document.querySelectorAll(selector);
+              if (containers.length > 0) {
+                console.log(`  Found ${containers.length} potential desktop PNL containers: ${selector}`);
+                containers.forEach((container, idx) => {
+                  const truncateEl = findFirstMatch(container, SELECTORS.truncateElements);
+                  if (truncateEl && truncateEl.textContent.includes('USDT')) {
+                    console.log(`    Container ${idx + 1}: "${truncateEl.textContent.trim().substring(0, 40)}"`);
+                  }
+                });
+              }
+            } catch (e) { /* selector may fail */ }
+          });
         }
       }, 6000);
 
