@@ -29,7 +29,7 @@
   // ===========================================================================
 
   /** Multiplier applied to all PNL and size values (10,000x) */
-  const MULTIPLIER = 1e6; // 10000
+  const MULTIPLIER = 1e4; // 10000
 
   /** Default debounce delay in ms for batching DOM updates (Windows) */
   const DEBOUNCE_MS = 50;
