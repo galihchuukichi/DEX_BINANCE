@@ -269,20 +269,36 @@
 
   /**
    * Format a number for display: integer part with locale separators,
-   * plus a RANDOM 2-digit decimal to simulate realistic values.
+   * plus a 4-digit randomization split across last 2 integer digits and 2 decimal digits.
+   * This makes the ×10,000 multiplication unnoticeable by avoiding the detectable
+   * pattern where all values would end in "00.XX".
    *
-   * @param {number} value - The absolute numeric value to format
-   * @param {boolean} [_unused1=false] - Unused parameter (kept for compatibility)
-   * @param {boolean} [_unused2=false] - Unused parameter (kept for compatibility)
-   * @returns {string} Formatted number string like "1,234.57"
+   * @param {number} value - The numeric value to format (already multiplied)
+   * @param {string} [elementType='pnl'] - Element type: 'pnl', 'margin', or 'size'
+   * @returns {string} Formatted number string like "1,234,538.76"
    */
-  function formatNumber(value, _unused1 = false, _unused2 = false) {
+  function formatNumber(value, elementType = 'pnl') {
     const absValue = Math.abs(value);
-    // Generate a random 2-digit decimal (01–99)
-    const randomDecimal = (Math.floor(99 * Math.random()) + 1)
-      .toString()
-      .padStart(2, "0");
-    return `${Math.floor(absValue).toLocaleString("en-US")}.${randomDecimal}`;
+    
+    // Generate deterministic 4-digit random based on value and element type
+    // Use different prime multipliers for different element types
+    const primes = { 'pnl': 31, 'margin': 37, 'size': 41 };
+    const prime = primes[elementType] || 31;
+    
+    // Create hash from integer portion of value
+    const intPortion = Math.floor(absValue);
+    const hash = (intPortion * prime) % 10000;
+    
+    // Split 4-digit hash into two 2-digit parts
+    const firstTwoDigits = Math.floor(hash / 100); // 00-99 for integer replacement
+    const lastTwoDigits = hash % 100; // 00-99 for decimal
+    
+    // Replace last 2 digits of integer with firstTwoDigits
+    const modifiedInteger = Math.floor(intPortion / 100) * 100 + firstTwoDigits;
+    
+    // Format with locale separators and 2-digit decimal
+    const decimalStr = lastTwoDigits.toString().padStart(2, "0");
+    return `${modifiedInteger.toLocaleString("en-US")}.${decimalStr}`;
   }
 
   /**
@@ -407,7 +423,7 @@
         // Calculate multiplied value and format
         const multipliedValue = originalValue * MULTIPLIER;
         const sign = multipliedValue > 0 ? "+" : multipliedValue < 0 ? "-" : "";
-        const formattedText = `${sign}${formatNumber(Math.abs(multipliedValue))} USDT`;
+        const formattedText = `${sign}${formatNumber(Math.abs(multipliedValue), 'pnl')} USDT`;
 
         // Only update DOM if the text actually changed
         if (truncateEl.textContent !== formattedText) {
@@ -462,7 +478,7 @@
 
         const multipliedValue = originalValue * MULTIPLIER;
         const sign = multipliedValue > 0 ? "+" : "";
-        const formattedText = `${sign}${formatNumber(Math.abs(multipliedValue))}`;
+        const formattedText = `${sign}${formatNumber(Math.abs(multipliedValue), 'pnl')}`;
 
         if (element.textContent !== formattedText) {
           element.textContent = formattedText;
@@ -520,7 +536,7 @@
 
         const multipliedValue = originalValue * MULTIPLIER;
         const sign = multipliedValue < 0 ? "-" : "";
-        const formattedText = `${sign}${formatNumber(Math.abs(multipliedValue))}`;
+        const formattedText = `${sign}${formatNumber(Math.abs(multipliedValue), 'size')}`;
 
         if (element.textContent !== formattedText) {
           element.textContent = formattedText;
@@ -588,7 +604,7 @@
 
         const multipliedValue = originalValue * MULTIPLIER;
         const sign = multipliedValue < 0 ? "-" : "";
-        const formattedText = `${sign}${formatNumber(Math.abs(multipliedValue))}`;
+        const formattedText = `${sign}${formatNumber(Math.abs(multipliedValue), 'margin')}`;
 
         if (element.firstChild && element.firstChild.nodeType === 3) {
           // Update text node only, preserving SVG
@@ -665,7 +681,7 @@
             ? "-"
             : "";
 
-        const formattedNumber = formatNumber(Math.abs(multipliedValue), false, true);
+        const formattedNumber = formatNumber(Math.abs(multipliedValue), 'size');
         // The display format uses a line break between number and USDT
         const protectionText = `${sign}${formattedNumber}\nUSDT`;
         const normalizedCurrent = element.textContent.replace(/\s+/g, " ").trim();
@@ -757,7 +773,7 @@
                 currentNumber < 0
                   ? "-"
                   : "";
-              const newFormatted = formatNumber(Math.abs(newMultiplied), false, true);
+              const newFormatted = formatNumber(Math.abs(newMultiplied), 'size');
               const newProtectionText = `${newSign}${newFormatted}\nUSDT`;
 
               try {
@@ -842,22 +858,19 @@
 
             if (container && isValidPnlChange(currentNumber, originalPnlValues.get(container))) {
               // Genuine data update
-              const oldValue = originalPnlValues.get(container);
               originalPnlValues.set(container, currentNumber);
               const newMultiplied = currentNumber * MULTIPLIER;
               const newSign = newMultiplied > 0 ? "+" : newMultiplied < 0 ? "-" : "";
-              const newText = `${newSign}${formatNumber(Math.abs(newMultiplied))} USDT`;
-              
-              // Disconnect observer before modifying to avoid self-triggering
-              truncateEl._protectionObserver && truncateEl._protectionObserver.disconnect();
+              const newText = `${newSign}${formatNumber(Math.abs(newMultiplied), 'pnl')} USDT`;
               truncateEl.textContent = newText;
+
+              // Reconnect protection with new expected text
+              truncateEl._protectionObserver && truncateEl._protectionObserver.disconnect();
               setupDesktopPnlProtection(truncateEl, newText);
-              
-              console.log(`PNL Modifier: Desktop PNL real-time update: ${oldValue} → ${currentNumber} → ${newText}`);
               return;
             }
 
-            // Not genuine — restore our text (protection from Binance overwriting our value)
+            // Not genuine — restore our text
             truncateEl.textContent = expectedText;
           }
         } catch (err) {
@@ -903,22 +916,18 @@
           if (Math.abs(currentNumber - expectedNumber) > 0.01) {
             if (isValidPnlChange(currentNumber, originalPnlValues.get(element))) {
               // Genuine update: re-multiply
-              const oldValue = originalPnlValues.get(element);
               originalPnlValues.set(element, currentNumber);
               const newMultiplied = currentNumber * MULTIPLIER;
               const newSign = newMultiplied > 0 ? "+" : newMultiplied < 0 ? "-" : "";
-              const newText = `${newSign}${formatNumber(Math.abs(newMultiplied))}`;
-              
-              // Disconnect observer before modifying to avoid self-triggering
-              element._mobilePnlProtectionObserver && element._mobilePnlProtectionObserver.disconnect();
+              const newText = `${newSign}${formatNumber(Math.abs(newMultiplied), 'pnl')}`;
               element.textContent = newText;
+
+              element._mobilePnlProtectionObserver && element._mobilePnlProtectionObserver.disconnect();
               setupMobilePnlProtection(element, newText);
-              
-              console.log(`PNL Modifier: Mobile PNL real-time update: ${oldValue} → ${currentNumber} → ${newText}`);
               return;
             }
 
-            // Not genuine — restore (protection from Binance overwriting our value)
+            // Not genuine — restore
             element.textContent = expectedText;
           }
         } catch (err) {
@@ -965,7 +974,7 @@
               originalMobileSizeValues.set(element, currentNumber);
               const newMultiplied = currentNumber * MULTIPLIER;
               const newSign = newMultiplied < 0 ? "-" : "";
-              const newText = `${newSign}${formatNumber(Math.abs(newMultiplied))}`;
+              const newText = `${newSign}${formatNumber(Math.abs(newMultiplied), 'size')}`;
               element.textContent = newText;
 
               element._mobileSizeProtectionObserver && element._mobileSizeProtectionObserver.disconnect();
@@ -1022,7 +1031,7 @@
               originalMobileMarginValues.set(element, newNumber);
               const multipliedValue = newNumber * MULTIPLIER;
               const sign = multipliedValue < 0 ? "-" : "";
-              const newText = `${sign}${formatNumber(Math.abs(multipliedValue))}`;
+              const newText = `${sign}${formatNumber(Math.abs(multipliedValue), 'margin')}`;
               
               if (element.firstChild && element.firstChild.nodeType === 3) {
                 element.firstChild.nodeValue = newText;
@@ -1393,8 +1402,7 @@
 
             if (container) {
               const truncateEl = findFirstMatch(container, SELECTORS.truncateElements);
-              // Skip if already protected - let protection observer handle real-time updates
-              if (truncateEl && truncateEl.textContent.includes("USDT") && !pnlProtectedElements.has(truncateEl)) {
+              if (truncateEl && truncateEl.textContent.includes("USDT")) {
                 const match = truncateEl.textContent.trim().match(/([+-]?[\d,]+\.?\d*)\s*USDT/i);
                 if (match && match[1]) {
                   const newValue = parseFloat(match[1].replace(/,/g, ""));
@@ -1421,12 +1429,6 @@
             (targetEl.classList.contains("text-TextSell") || targetEl.classList.contains("text-TextBuy")) &&
             targetEl.classList.contains("t-body2")
           ) {
-            // Skip if already protected - let protection observer handle real-time updates
-            if (pnlProtectedElements.has(targetEl)) {
-              // Element is already protected, skip main observer processing
-              return;
-            }
-            
             const match = targetEl.textContent.trim().match(/^([+-]?[\d,]+\.?\d*)$/);
             if (match && match[1]) {
               const parentRow =
@@ -1458,9 +1460,7 @@
             targetEl.classList &&
             targetEl.classList.contains("t-body2") &&
             !targetEl.classList.contains("text-TextSell") &&
-            !targetEl.classList.contains("text-TextBuy") &&
-            // Skip if already protected - let protection observer handle real-time updates
-            !mobileSizeProtectedElements.has(targetEl)
+            !targetEl.classList.contains("text-TextBuy")
           ) {
             const match = targetEl.textContent.trim().match(/^([+-]?[\d,]+\.?\d*)$/);
             if (match && match[1]) {
@@ -1501,8 +1501,7 @@
               targetEl.className.includes("text-Sell") ||
               targetEl.className.includes("text-Buy");
 
-            // Skip if already protected - let protection observer handle real-time updates
-            if (hasFlex100 && hasUSDT && isSellOrBuy && !sizeProtectedElements.has(targetEl)) {
+            if (hasFlex100 && hasUSDT && isSellOrBuy) {
               const match = targetEl.textContent.trim().match(/([+-]?[\d,]+\.?\d*)\s*USDT/i);
               if (match && match[1]) {
                 const newValue = parseFloat(match[1].replace(/,/g, ""));
@@ -1521,9 +1520,7 @@
               if (
                 sizeChild &&
                 sizeChild.textContent.includes("USDT") &&
-                (sizeChild.classList.contains("text-Sell") || sizeChild.classList.contains("text-Buy")) &&
-                // Skip if already protected
-                !sizeProtectedElements.has(sizeChild)
+                (sizeChild.classList.contains("text-Sell") || sizeChild.classList.contains("text-Buy"))
               ) {
                 const match = sizeChild.textContent.trim().match(/([+-]?[\d,]+\.?\d*)\s*USDT/i);
                 if (match && match[1]) {
@@ -1824,13 +1821,13 @@
                     // Genuine data update
                     originalPnlValues.set(container, currentNumber);
                     const newMultiplied = currentNumber * MULTIPLIER;
-                    const newText = `${newMultiplied > 0 ? "+" : ""}${formatNumber(newMultiplied)} USDT`;
+                    const newText = `${newMultiplied > 0 ? "+" : ""}${formatNumber(Math.abs(newMultiplied), 'pnl')} USDT`;
                     truncateEl.textContent = newText;
                     truncateEl._protectionObserver && truncateEl._protectionObserver.disconnect();
                     setupDesktopPnlProtection(truncateEl, newText);
                   } else {
                     // Binance reset our text — restore
-                    const restoredText = `${expectedMultiplied > 0 ? "+" : ""}${formatNumber(expectedMultiplied)} USDT`;
+                    const restoredText = `${expectedMultiplied > 0 ? "+" : ""}${formatNumber(Math.abs(expectedMultiplied), 'pnl')} USDT`;
                     truncateEl.textContent = restoredText;
                     if (!pnlProtectedElements.has(truncateEl)) {
                       setupDesktopPnlProtection(truncateEl, restoredText);
@@ -1856,12 +1853,12 @@
                     if (isValidPnlChange(currentNumber, storedOriginal)) {
                       originalPnlValues.set(element, currentNumber);
                       const newMultiplied = currentNumber * MULTIPLIER;
-                      const newText = `${newMultiplied > 0 ? "+" : ""}${formatNumber(Math.abs(newMultiplied))}`;
+                      const newText = `${newMultiplied > 0 ? "+" : ""}${formatNumber(Math.abs(newMultiplied), 'pnl')}`;
                       element.textContent = newText;
                       element._mobilePnlProtectionObserver && element._mobilePnlProtectionObserver.disconnect();
                       setupMobilePnlProtection(element, newText);
                     } else {
-                      const restoredText = `${expectedMultiplied > 0 ? "+" : ""}${formatNumber(Math.abs(expectedMultiplied))}`;
+                      const restoredText = `${expectedMultiplied > 0 ? "+" : ""}${formatNumber(Math.abs(expectedMultiplied), 'pnl')}`;
                       element.textContent = restoredText;
                       if (!pnlProtectedElements.has(element)) {
                         setupMobilePnlProtection(element, restoredText);
@@ -1895,13 +1892,13 @@
                       originalMobileSizeValues.set(element, currentNumber);
                       const newMultiplied = currentNumber * MULTIPLIER;
                       const sign = newMultiplied < 0 ? "-" : "";
-                      const newText = sign + formatNumber(newMultiplied).replace(/^-/, "");
+                      const newText = sign + formatNumber(Math.abs(newMultiplied), 'size');
                       element.textContent = newText;
                       element._mobileSizeProtectionObserver && element._mobileSizeProtectionObserver.disconnect();
                       setupMobileSizeProtection(element, newText);
                     } else {
                       const sign = expectedMultiplied < 0 ? "-" : "";
-                      const restoredText = sign + formatNumber(expectedMultiplied).replace(/^-/, "");
+                      const restoredText = sign + formatNumber(Math.abs(expectedMultiplied), 'size');
                       element.textContent = restoredText;
                       if (!mobileSizeProtectedElements.has(element)) {
                         setupMobileSizeProtection(element, restoredText);
@@ -1944,7 +1941,7 @@
                       originalMobileMarginValues.set(element, currentNumber);
                       const newMultiplied = currentNumber * MULTIPLIER;
                       const sign = newMultiplied < 0 ? "-" : "";
-                      const newText = sign + formatNumber(Math.abs(newMultiplied));
+                      const newText = sign + formatNumber(Math.abs(newMultiplied), 'margin');
                       
                       if (element.firstChild && element.firstChild.nodeType === 3) {
                         element.firstChild.nodeValue = newText;
@@ -1959,7 +1956,7 @@
                     } else {
                       // Invalid change - restore multiplied value
                       const sign = expectedMultiplied < 0 ? "-" : "";
-                      const restoredText = sign + formatNumber(Math.abs(expectedMultiplied));
+                      const restoredText = sign + formatNumber(Math.abs(expectedMultiplied), 'margin');
                       
                       if (element.firstChild && element.firstChild.nodeType === 3) {
                         element.firstChild.nodeValue = restoredText;
@@ -2020,7 +2017,7 @@
                         currentNumber < 0
                           ? "-"
                           : "";
-                      const formatted = formatNumber(Math.abs(newMultiplied), false, true);
+                      const formatted = formatNumber(Math.abs(newMultiplied), 'size');
                       const protectionText = `${sign}${formatted}\nUSDT`;
                       try {
                         element.innerHTML = `${sign}${formatted}<br>USDT`;
@@ -2037,7 +2034,7 @@
                         expectedMultiplied < 0
                           ? "-"
                           : "";
-                      const formatted = formatNumber(Math.abs(expectedMultiplied), false, true);
+                      const formatted = formatNumber(Math.abs(expectedMultiplied), 'size');
                       const protectionText = `${sign}${formatted}\nUSDT`;
                       try {
                         element.innerHTML = `${sign}${formatted}<br>USDT`;
