@@ -1168,13 +1168,6 @@
     if (!sizeProtectedElements.has(element)) return;
 
     const observer = new MutationObserver((mutations) => {
-      // Early exit: Stop if element detached from DOM
-      if (!document.body.contains(element)) {
-        observer.disconnect();
-        delete element._sizeProtectionObserver;
-        return;
-      }
-      
       mutations.forEach((mutation) => {
         if (mutation.type !== "characterData" && mutation.type !== "childList") return;
 
@@ -1272,13 +1265,6 @@
     if (!pnlProtectedElements.has(truncateEl)) return;
 
     const observer = new MutationObserver((mutations) => {
-      // Early exit: Stop if element detached from DOM
-      if (!document.body.contains(truncateEl)) {
-        observer.disconnect();
-        delete truncateEl._protectionObserver;
-        return;
-      }
-      
       mutations.forEach((mutation) => {
         if (mutation.type !== "characterData" && mutation.type !== "childList") return;
 
@@ -1342,13 +1328,6 @@
     if (!pnlProtectedElements.has(element)) return;
 
     const observer = new MutationObserver((mutations) => {
-      // Early exit: Stop if element detached from DOM
-      if (!document.body.contains(element)) {
-        observer.disconnect();
-        delete element._mobilePnlProtectionObserver;
-        return;
-      }
-      
       mutations.forEach((mutation) => {
         if (mutation.type !== "characterData" && mutation.type !== "childList") return;
 
@@ -1407,13 +1386,6 @@
     if (!mobileSizeProtectedElements.has(element)) return;
 
     const observer = new MutationObserver((mutations) => {
-      // Early exit: Stop if element detached from DOM
-      if (!document.body.contains(element)) {
-        observer.disconnect();
-        delete element._mobileSizeProtectionObserver;
-        return;
-      }
-      
       mutations.forEach((mutation) => {
         if (mutation.type !== "characterData" && mutation.type !== "childList") return;
 
@@ -1470,13 +1442,6 @@
     if (!mobileMarginProtectedElements.has(element)) return;
 
     const observer = new MutationObserver((mutations) => {
-      // Early exit: Stop if element detached from DOM
-      if (!document.body.contains(element)) {
-        observer.disconnect();
-        delete element._mobileMarginProtectionObserver;
-        return;
-      }
-      
       mutations.forEach((mutation) => {
         try {
           // Extract current text from text node
@@ -1756,13 +1721,6 @@
     if (!shareCardPnlProtectedElements.has(element)) return;
 
     const observer = new MutationObserver((mutations) => {
-      // Early exit: Stop if element detached from DOM
-      if (!document.body.contains(element)) {
-        observer.disconnect();
-        delete element._shareCardProtectionObserver;
-        return;
-      }
-      
       mutations.forEach((mutation) => {
         if (mutation.type !== "characterData" && mutation.type !== "childList") return;
 
@@ -1853,14 +1811,6 @@
    * @param {MutationRecord[]} mutations - Array of DOM mutation records
    */
   function handleMutations(mutations) {
-    // RECURSION PREVENTION: Prevent infinite feedback loops
-    if (window._pnlModifierProcessing) {
-      return; // Exit immediately if already processing
-    }
-    window._pnlModifierProcessing = true;
-    // Reset flag after current call stack completes
-    setTimeout(() => { window._pnlModifierProcessing = false; }, 0);
-
     // Collect elements that need processing, separated by type
     const desktopPnlToProcess = new Set();
     const desktopSizeToProcess = new Set();
@@ -1884,14 +1834,13 @@
                 // Search within the new node's subtree
                 const matches = node.querySelectorAll ? node.querySelectorAll(selector) : [];
                 matches.forEach((card) => {
-                  // Viewport filtering: Skip off-screen elements
-                  if (!positionCardMapping.has(card) && isInViewport(card)) {
+                  if (!positionCardMapping.has(card)) {
                     linkPositionCard(card);
                   }
                 });
 
                 // Check if the node itself is a position card
-                if (node.matches && node.matches(selector) && !positionCardMapping.has(node) && isInViewport(node)) {
+                if (node.matches && node.matches(selector) && !positionCardMapping.has(node)) {
                   linkPositionCard(node);
                 }
               } catch (e) { /* selector may not be valid for this node */ }
@@ -2258,10 +2207,51 @@
         }
 
         // =================================================================
-        // CASE 7: SHARE CARDS - Now handled by dedicated observer (see initialize)
+        // CASE 7: NEW SHARE CARDS DETECTED
         // =================================================================
-        // Share card detection removed from main observer to prevent performance issues.
-        // Dedicated shareCardObserver watches document.body with subtree:false for efficiency.
+        if (mutation.type === "childList" && mutation.addedNodes.length > 0) {
+          mutation.addedNodes.forEach((node) => {
+            if (node.nodeType !== 1) return;
+
+            // Check if this is a share card container or contains one
+            SELECTORS.shareCardContainers.forEach((selector) => {
+              try {
+                // Check if node itself is share card
+                if (node.matches && node.matches(selector)) {
+                  if (!processedShareCards.has(node)) {
+                    processedShareCards.add(node);
+                    console.log("PNL Modifier: Share card detected (node itself)");
+                    
+                    // Find and process PNL element
+                    SELECTORS.shareCardPnlElements.forEach((pnlSelector) => {
+                      const pnlEl = node.querySelector(pnlSelector);
+                      if (pnlEl && !modifiedShareCardPnlElements.has(pnlEl)) {
+                        queueShareCardUpdate(pnlEl);
+                      }
+                    });
+                  }
+                }
+
+                // Check if node contains share card
+                const matches = node.querySelectorAll ? node.querySelectorAll(selector) : [];
+                matches.forEach((shareCard) => {
+                  if (!processedShareCards.has(shareCard)) {
+                    processedShareCards.add(shareCard);
+                    console.log("PNL Modifier: Share card detected (child)");
+                    
+                    // Find and process PNL element
+                    SELECTORS.shareCardPnlElements.forEach((pnlSelector) => {
+                      const pnlEl = shareCard.querySelector(pnlSelector);
+                      if (pnlEl && !modifiedShareCardPnlElements.has(pnlEl)) {
+                        queueShareCardUpdate(pnlEl);
+                      }
+                    });
+                  }
+                });
+              } catch (e) { /* selector may fail */ }
+            });
+          });
+        }
 
       } // end for (mutation of mutations)
 
@@ -2499,9 +2489,12 @@
         console.log("PNL Modifier: Using body as fallback container");
       }
 
-      // Keep observer scoped to #POSITIONS for performance
-      // Share cards handled by separate dedicated observer below
-      console.log(`PNL Modifier: Observing ${observeTarget.id || observeTarget.nodeName}`);
+      // --- Expand observer scope to document.body for share card detection ---
+      // Share cards appear outside #POSITIONS, so we need to observe body
+      if (observeTarget && (observeTarget.id === "POSITIONS" || observeTarget !== document.body)) {
+        console.log("PNL Modifier: Expanding observer to document.body for share card detection");
+        observeTarget = document.body;
+      }
 
       // --- Set up the main MutationObserver ---
       new MutationObserver(handleMutations).observe(observeTarget, {
@@ -2510,63 +2503,6 @@
         characterData: true,
         attributes: false // We don't need attribute changes
       });
-
-      // --- Set up dedicated SHARE CARD observer (lightweight, body direct children only) ---
-      const shareCardObserver = new MutationObserver((mutations) => {
-        mutations.forEach((mutation) => {
-          if (mutation.type !== "childList" || !mutation.addedNodes.length) return;
-          
-          mutation.addedNodes.forEach((node) => {
-            if (node.nodeType !== 1) return;
-            
-            // Direct check for share card container (no nested loops)
-            if (node.id === "share-position-poster" || 
-                node.id === "web-share-sdk-share-poster" ||
-                (node.matches && node.matches('#share-position-poster, #web-share-sdk-share-poster'))) {
-              
-              if (!processedShareCards.has(node)) {
-                processedShareCards.add(node);
-                console.log("PNL Modifier: Share card detected via dedicated observer");
-                
-                // Find and process PNL element
-                setTimeout(() => { // Defer to next tick for DOM stability
-                  SELECTORS.shareCardPnlElements.forEach((pnlSelector) => {
-                    const pnlEl = node.querySelector(pnlSelector);
-                    if (pnlEl && !modifiedShareCardPnlElements.has(pnlEl)) {
-                      queueShareCardUpdate(pnlEl);
-                    }
-                  });
-                }, 50);
-              }
-            }
-            
-            // Also check if node CONTAINS share card (modal wrapper case)
-            if (node.querySelector) {
-              const shareCard = node.querySelector('#share-position-poster, #web-share-sdk-share-poster');
-              if (shareCard && !processedShareCards.has(shareCard)) {
-                processedShareCards.add(shareCard);
-                console.log("PNL Modifier: Share card detected in wrapper via dedicated observer");
-                
-                setTimeout(() => {
-                  SELECTORS.shareCardPnlElements.forEach((pnlSelector) => {
-                    const pnlEl = shareCard.querySelector(pnlSelector);
-                    if (pnlEl && !modifiedShareCardPnlElements.has(pnlEl)) {
-                      queueShareCardUpdate(pnlEl);
-                    }
-                  });
-                }, 50);
-              }
-            }
-          });
-        });
-      });
-      
-      // Observe body with subtree:false (only direct children, not entire tree)
-      shareCardObserver.observe(document.body, {
-        childList: true,
-        subtree: false // KEY: Only direct body children = 1-2 callbacks/sec vs 150-200/sec
-      });
-      console.log("PNL Modifier: Dedicated share card observer active (subtree:false for performance)");
 
       // --- Perform initial scan ---
       performFullScan();
@@ -2599,64 +2535,10 @@
       );
 
       // =================================================================
-      // PERIODIC MAINTENANCE INTERVAL (every 10 seconds)
-      // Increased from 5 to 10 seconds for better performance
+      // PERIODIC MAINTENANCE INTERVAL (every 5 seconds)
       // =================================================================
       setInterval(() => {
         const now = Date.now();
-
-        // --- Clean up orphaned protection observers (prevents memory leaks) ---
-        // Check all protection observer WeakSets and disconnect detached elements
-        const cleanupObservers = (elements, observerKey) => {
-          const toDelete = [];
-          for (const element of [].concat(...elements)) {
-            if (!element || !document.body.contains(element)) {
-              const observer = element?.[observerKey];
-              if (observer) {
-                observer.disconnect();
-                delete element[observerKey];
-              }
-              toDelete.push(element);
-            }
-          }
-          return toDelete;
-        };
-
-        try {
-          // Iterate through Maps that track elements (can't iterate WeakSets directly)
-          originalPnlValues.forEach((val, element) => {
-            if (!document.body.contains(element)) {
-              element._protectionObserver?.disconnect();
-              element._mobilePnlProtectionObserver?.disconnect();
-            }
-          });
-          
-          originalSizeValues.forEach((val, element) => {
-            if (!document.body.contains(element)) {
-              element._sizeProtectionObserver?.disconnect();
-            }
-          });
-          
-          originalMobileSizeValues.forEach((val, element) => {
-            if (!document.body.contains(element)) {
-              element._mobileSizeProtectionObserver?.disconnect();
-            }
-          });
-          
-          originalMobileMarginValues.forEach((val, element) => {
-            if (!document.body.contains(element)) {
-              element._mobileMarginProtectionObserver?.disconnect();
-            }
-          });
-          
-          originalShareCardPnlValues.forEach((val, element) => {
-            if (!document.body.contains(element)) {
-              element._shareCardProtectionObserver?.disconnect();
-            }
-          });
-        } catch (err) {
-          console.warn("PNL Modifier: Error cleaning up observers:", err);
-        }
 
         // --- Refresh ROI-based PNL calculations for all tracked cards ---
         positionCardMapping.forEach((cardData, card) => {
@@ -3006,7 +2888,7 @@
           } catch (e) { /* selector issue */ }
         });
 
-      }, 10000); // Run every 10 seconds (increased from 5 for better performance)
+      }, 5000); // Run every 5 seconds
 
       // --- Success log ---
       console.log(
